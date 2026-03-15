@@ -119,6 +119,7 @@ const player = {
   y: 250,
   w: 32,
   h: 44,
+  vx: 0,
   vy: 0,
   thrust: false,
   particles: [],
@@ -133,6 +134,25 @@ let screenShake = 0;
 let collectEffects = [];
 let deathPieces = []; // body parts on death
 let deathFlash = 0;
+let combo = 0;
+let comboTimer = 0;
+let maxCombo = 0;
+let xp = 0;
+let xpLevel = 1;
+let xpToNext = 100;
+let hudPopups = []; // floating +score popups
+let levelUpFlash = 0;
+let nearMissTimer = 0;
+let nearMissCount = 0;
+
+// Fuel system
+let fuel = 100;
+const fuelMax = 100;
+const fuelDrain = 0.15; // per frame while thrusting
+const fuelRegen = 0.03; // passive regen when not thrusting
+let fuelCans = [];
+let fuelWarning = 0; // flashing when low
+let fuelBoost = 0; // brief glow after pickup
 
 // Init bg particles
 function initBgParticles() {
@@ -163,6 +183,8 @@ initFormations();
 
 // ===== INPUT =====
 let inputDown = false;
+let mouseTarget = { x: -1, y: -1, active: false }; // mouse/touch target for free movement
+let keys = { up: false, down: false, left: false, right: false };
 
 function resumeAudio() {
   if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -179,34 +201,54 @@ function getCanvasCoords(clientX, clientY) {
 document.addEventListener('mousedown', (e) => {
   resumeAudio();
   const {x: mx, y: my} = getCanvasCoords(e.clientX, e.clientY);
-  // Toggle button check (top-center area)
   const toggleX = canvas.width / 2 - 50;
-  if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 38) {
+  if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 60) {
     nightMode = !nightMode;
     return;
   }
   inputDown = true;
+  mouseTarget = { x: mx, y: my, active: true };
   handleInput();
 });
-document.addEventListener('mouseup', () => { inputDown = false; });
+document.addEventListener('mousemove', (e) => {
+  if (inputDown) {
+    const {x: mx, y: my} = getCanvasCoords(e.clientX, e.clientY);
+    mouseTarget = { x: mx, y: my, active: true };
+  }
+});
+document.addEventListener('mouseup', () => { inputDown = false; mouseTarget.active = false; });
 document.addEventListener('touchstart', (e) => {
   e.preventDefault(); resumeAudio();
   const {x: mx, y: my} = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
   const toggleX = canvas.width / 2 - 50;
-  if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 38) {
+  if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 60) {
     nightMode = !nightMode;
     return;
   }
   inputDown = true;
+  mouseTarget = { x: mx, y: my, active: true };
   handleInput();
 });
-document.addEventListener('touchend', (e) => { e.preventDefault(); inputDown = false; });
+document.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    const {x: mx, y: my} = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
+    mouseTarget = { x: mx, y: my, active: true };
+  }
+});
+document.addEventListener('touchend', (e) => { e.preventDefault(); inputDown = false; mouseTarget.active = false; });
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); resumeAudio(); inputDown = true; handleInput(); }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); resumeAudio(); keys.up = true; inputDown = true; handleInput(); }
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') { e.preventDefault(); keys.down = true; }
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') { e.preventDefault(); keys.left = true; }
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') { e.preventDefault(); keys.right = true; }
   if (e.code === 'KeyN') nightMode = !nightMode;
 });
 document.addEventListener('keyup', (e) => {
-  if (e.code === 'Space' || e.code === 'ArrowUp') inputDown = false;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { keys.up = false; inputDown = keys.down || keys.left || keys.right; }
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') { keys.down = false; }
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') { keys.left = false; }
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') { keys.right = false; }
 });
 
 function handleInput() {
@@ -221,7 +263,9 @@ function startGame() {
   game.frame = 0;
   game.crystalsCollected = 0;
   game.level = 1;
+  player.x = 120;
   player.y = canvas.height / 2;
+  player.vx = 0;
   player.vy = 0;
   player.particles = [];
   player.scale = 1.0;
@@ -231,6 +275,85 @@ function startGame() {
   deathPieces = [];
   deathFlash = 0;
   screenShake = 0;
+  combo = 0;
+  comboTimer = 0;
+  maxCombo = 0;
+  xp = 0;
+  xpLevel = 1;
+  xpToNext = 100;
+  hudPopups = [];
+  levelUpFlash = 0;
+  nearMissTimer = 0;
+  nearMissCount = 0;
+  fuel = fuelMax;
+  fuelCans = [];
+  fuelWarning = 0;
+  fuelBoost = 0;
+  currentBiome = 0;
+  lastBiome = 0;
+  biomeTransition = 0;
+}
+
+function playLevelUpSound() {
+  const now = audioCtx.currentTime;
+  [523, 659, 784, 1047].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(0.1, now + i * 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.2);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(now + i * 0.08); osc.stop(now + i * 0.08 + 0.25);
+  });
+}
+
+function playComboSound(comboNum) {
+  const now = audioCtx.currentTime;
+  const freq = 800 + Math.min(comboNum, 10) * 100;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(freq, now);
+  osc.frequency.exponentialRampToValueAtTime(freq * 1.3, now + 0.05);
+  g.gain.setValueAtTime(0.08, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+  osc.connect(g); g.connect(audioCtx.destination);
+  osc.start(now); osc.stop(now + 0.15);
+}
+
+function addXP(amount) {
+  xp += amount;
+  while (xp >= xpToNext) {
+    xp -= xpToNext;
+    xpLevel++;
+    xpToNext = Math.floor(100 * Math.pow(1.3, xpLevel - 1));
+    levelUpFlash = 60;
+    playLevelUpSound();
+    hudPopups.push({
+      text: `RANK ${xpLevel}!`,
+      x: canvas.width / 2,
+      y: canvas.height / 2 - 40,
+      vy: -1.5,
+      life: 80,
+      maxLife: 80,
+      color: '#ff44ff',
+      size: 32,
+      glow: true,
+    });
+  }
+}
+
+function spawnScorePopup(x, y, text, color) {
+  hudPopups.push({
+    text, x, y,
+    vy: -2,
+    life: 40,
+    maxLife: 40,
+    color: color || '#ffd700',
+    size: 16,
+    glow: false,
+  });
 }
 
 function getDifficultyState() {
@@ -369,22 +492,6 @@ function spawnObstacle() {
       angle: 0,
       bumps: Array.from({length: 10}, () => Math.random() * 8 + 20),
     });
-  } else if (level >= 3) {
-    const y = Math.random() * (groundY - 120) + 60;
-    obstacles.push({
-      type: 'dustCloud',
-      x: canvas.width + 20,
-      y: y,
-      w: 250, h: 50,
-      timer: 70,
-      active: false,
-      dustParticles: Array.from({length: 35}, () => ({
-        ox: Math.random() * 250,
-        oy: (Math.random() - 0.5) * 50,
-        size: Math.random() * 10 + 3,
-        drift: (Math.random() - 0.5) * 0.5,
-      })),
-    });
   } else {
     const y = Math.random() * (groundY - 150) + 60;
     obstacles.push({
@@ -414,6 +521,31 @@ function spawnCoins() {
     if (pattern === 2) cy = startY - i * 25;
     coins.push({ x: cx, y: cy, r: 12, collected: false });
   }
+}
+
+// Fuel can spawning
+function spawnFuelCan() {
+  const groundY = canvas.height - 50;
+  const y = Math.random() * (groundY - 120) + 70;
+  fuelCans.push({ x: canvas.width + 20, y: y, w: 20, h: 26, collected: false, bob: Math.random() * Math.PI * 2 });
+}
+
+function playFuelSound() {
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const osc2 = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = 'square';
+  osc2.type = 'sine';
+  osc.frequency.setValueAtTime(220, now);
+  osc.frequency.exponentialRampToValueAtTime(880, now + 0.1);
+  osc2.frequency.setValueAtTime(440, now);
+  osc2.frequency.exponentialRampToValueAtTime(1200, now + 0.08);
+  g.gain.setValueAtTime(0.08, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+  osc.connect(g); osc2.connect(g); g.connect(audioCtx.destination);
+  osc.start(now); osc.stop(now + 0.2);
+  osc2.start(now); osc2.stop(now + 0.2);
 }
 
 // ===== COLLISION =====
@@ -483,26 +615,78 @@ function update() {
 
   if (game.state !== 'playing') return;
 
-  if (inputDown) {
-    player.vy -= 0.8;
-    if (game.frame % 2 === 0) emitJetpackParticle();
-    player.thrust = true;
+  // --- Fuel system ---
+  const hasFuel = fuel > 0;
+  if (fuelBoost > 0) fuelBoost--;
+  if (fuelWarning > 0) fuelWarning--;
+  if (fuel <= 20 && game.frame % 30 === 0) fuelWarning = 15;
+
+  // --- Full 2D movement ---
+  const moveSpeed = 0.7;
+  const friction = 0.88;
+  let isThrusting = false;
+
+  // Mouse/touch: move toward target position
+  if (mouseTarget.active && inputDown && hasFuel) {
+    const dx = mouseTarget.x - (player.x + player.w / 2);
+    const dy = mouseTarget.y - (player.y + player.h / 2);
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 5) {
+      player.vx += (dx / dist) * moveSpeed;
+      player.vy += (dy / dist) * moveSpeed;
+    }
+    isThrusting = true;
   } else {
-    player.vy += 0.5;
+    // Keyboard movement
+    if (keys.up && hasFuel) {
+      player.vy -= 0.8;
+      isThrusting = true;
+    } else {
+      player.vy += 0.5; // gravity
+    }
+    if (keys.down) player.vy += 0.6;
+    if (keys.left) player.vx -= moveSpeed;
+    if (keys.right) player.vx += moveSpeed;
+
+    // If just tapping/holding (no mouse, no keys), use old behavior
+    if (!keys.up && !keys.down && !keys.left && !keys.right && inputDown && hasFuel) {
+      player.vy -= 0.8;
+      isThrusting = true;
+    }
+  }
+
+  // Consume or regen fuel
+  if (isThrusting) {
+    fuel = Math.max(0, fuel - fuelDrain);
+    player.thrust = true;
+    if (game.frame % 2 === 0) emitJetpackParticle();
+  } else {
+    fuel = Math.min(fuelMax, fuel + fuelRegen);
     player.thrust = false;
   }
 
+  // Apply friction to horizontal movement
+  player.vx *= friction;
+
+  // Clamp velocities
+  player.vx = Math.max(-10, Math.min(10, player.vx));
   player.vy = Math.max(-8, Math.min(8, player.vy));
+
+  player.x += player.vx;
   player.y += player.vy;
 
   const sw = player.w * player.scale;
   const sh = player.h * player.scale;
 
+  // Vertical bounds
   if (player.y < 15) { player.y = 15; player.vy = 0; }
   if (player.y + sh > groundY) {
     player.y = groundY - sh;
     player.vy = 0;
   }
+  // Horizontal bounds
+  if (player.x < 10) { player.x = 10; player.vx = 0; }
+  if (player.x + sw > canvas.width - 10) { player.x = canvas.width - sw - 10; player.vx = 0; }
 
   game.score += 1;
   const difficulty = getDifficultyState();
@@ -511,6 +695,7 @@ function update() {
 
   if (game.frame % difficulty.obstacleInterval === 0) spawnObstacle();
   if (game.frame % difficulty.coinInterval === 0) spawnCoins();
+  if (game.frame % 200 === 0) spawnFuelCan(); // fuel cans every ~3.3 sec
 
   // Update obstacles
   for (let i = obstacles.length - 1; i >= 0; i--) {
@@ -518,10 +703,6 @@ function update() {
     if (o.type === 'rollingStone') {
       if (o.warning > 0) o.warning--;
       else { o.x -= o.speed; o.angle -= 0.1; }
-    } else if (o.type === 'dustCloud') {
-      o.x -= game.speed;
-      if (o.timer > 0) o.timer--;
-      else o.active = true;
     } else if (o.type === 'forkRock') {
       o.x -= game.speed;
     } else {
@@ -536,8 +717,6 @@ function update() {
       hit = circleRectOverlap(o.x + o.w / 2, o.y + o.h / 2, o.radius, player.x, player.y, sw, sh);
     } else if (o.type === 'rollingStone' && o.warning <= 0) {
       hit = circleRectOverlap(o.x + o.w / 2, o.y, o.radius, player.x, player.y, sw, sh);
-    } else if (o.type === 'dustCloud' && o.active) {
-      hit = rectsOverlap(player.x, player.y, sw, sh, o.x, o.y - o.h / 2, o.w, o.h);
     } else if (o.type === 'forkRock') {
       const trunkH = o.h * 0.55;
       const trunkY = o.side === 'top' ? o.y : o.y + o.h - trunkH;
@@ -576,14 +755,86 @@ function update() {
       const dy = (player.y + sh / 2) - coins[i].y;
       if (Math.sqrt(dx * dx + dy * dy) < coins[i].r + 15 * player.scale) {
         coins[i].collected = true;
-        game.score += 50;
+        // Combo system
+        combo++;
+        comboTimer = 90; // ~1.5 sec window
+        if (combo > maxCombo) maxCombo = combo;
+        const comboMult = Math.min(combo, 10);
+        const baseScore = 50;
+        const totalScore = baseScore * comboMult;
+        game.score += totalScore;
         game.crystalsCollected++;
         player.scale += 0.0005;
+        addXP(10 + comboMult * 3);
         playCrystalSound();
+        if (combo > 1) playComboSound(combo);
         spawnCollectEffect(coins[i].x, coins[i].y);
+        // Score popup
+        let popText = `+${totalScore}`;
+        if (combo > 1) popText += ` x${comboMult}`;
+        spawnScorePopup(coins[i].x, coins[i].y - 20, popText, combo > 4 ? '#ff66ff' : combo > 2 ? '#66ffff' : '#ffd700');
+        if (combo === 5) {
+          spawnScorePopup(coins[i].x, coins[i].y - 45, 'FRENZY!', '#ff44ff');
+        } else if (combo === 10) {
+          spawnScorePopup(coins[i].x, coins[i].y - 45, 'UNSTOPPABLE!', '#ff2222');
+        }
       }
     }
   }
+
+  // Update fuel cans
+  for (let i = fuelCans.length - 1; i >= 0; i--) {
+    fuelCans[i].x -= game.speed;
+    fuelCans[i].bob += 0.06;
+    if (fuelCans[i].x < -30) { fuelCans.splice(i, 1); continue; }
+    if (!fuelCans[i].collected) {
+      const fc = fuelCans[i];
+      const bobY = fc.y + Math.sin(fc.bob) * 6;
+      if (rectsOverlap(player.x, player.y, sw, sh, fc.x - fc.w/2, bobY - fc.h/2, fc.w, fc.h)) {
+        fc.collected = true;
+        const refill = 30 + Math.random() * 15;
+        fuel = Math.min(fuelMax, fuel + refill);
+        fuelBoost = 30;
+        playFuelSound();
+        addXP(5);
+        spawnScorePopup(fc.x, bobY - 20, `+FUEL`, '#44ddff');
+        spawnCollectEffect(fc.x, bobY);
+      }
+    }
+  }
+
+  // Combo timer
+  if (comboTimer > 0) {
+    comboTimer--;
+    if (comboTimer <= 0) combo = 0;
+  }
+
+  // Near-miss detection
+  const sw2 = sw, sh2 = sh;
+  for (const o of obstacles) {
+    let nearDist = Infinity;
+    if (o.type === 'boulder') {
+      const ddx = (o.x + o.w/2) - (player.x + sw2/2);
+      const ddy = (o.y + o.h/2) - (player.y + sh2/2);
+      nearDist = Math.sqrt(ddx*ddx + ddy*ddy) - o.radius - Math.max(sw2, sh2)/2;
+    } else if (o.type === 'rollingStone' && o.warning <= 0) {
+      const ddx = (o.x + o.w/2) - (player.x + sw2/2);
+      const ddy = o.y - (player.y + sh2/2);
+      nearDist = Math.sqrt(ddx*ddx + ddy*ddy) - o.radius - Math.max(sw2, sh2)/2;
+    }
+    if (nearDist > 0 && nearDist < 22 && nearMissTimer <= 0) {
+      nearMissTimer = 30;
+      nearMissCount++;
+      addXP(25);
+      game.score += 100;
+      spawnScorePopup(player.x + sw2 + 10, player.y, 'NEAR MISS! +100', '#44ff44');
+    }
+  }
+  if (nearMissTimer > 0) nearMissTimer--;
+  if (levelUpFlash > 0) levelUpFlash--;
+
+  // XP from distance
+  if (game.frame % 60 === 0) addXP(5);
 
   // Update particles
   for (let i = player.particles.length - 1; i >= 0; i--) {
@@ -596,6 +847,12 @@ function update() {
     e.x += e.vx; e.y += e.vy; e.life--;
     if (e.life <= 0) collectEffects.splice(i, 1);
   }
+  // Update HUD popups
+  for (let i = hudPopups.length - 1; i >= 0; i--) {
+    hudPopups[i].y += hudPopups[i].vy;
+    hudPopups[i].life--;
+    if (hudPopups[i].life <= 0) hudPopups.splice(i, 1);
+  }
   for (const s of bgParticles) {
     s.x -= s.speed; s.twinkle += 0.03;
     if (s.x < 0) { s.x = canvas.width; s.y = Math.random() * canvas.height; }
@@ -603,10 +860,26 @@ function update() {
   if (screenShake > 0) screenShake -= 0.6;
 }
 
-// ===== THEME =====
-function getTheme() {
-  if (nightMode) {
-    return {
+// ===== BIOME SYSTEM =====
+let currentBiome = 0;
+let biomeTransition = 0; // flash on biome change
+let lastBiome = 0;
+
+const BIOMES = [
+  { // 0: Classic Mine (0-5km)
+    name: 'THE MINE', nameColor: '#ffd700',
+    day: {
+      bgTop: '#3a2810', bgBot: '#5a3c18',
+      ceilingFill: '#4a3215', ceilingLine: '#6a4a25',
+      groundFill: '#4a3215', groundLine: '#6a4a25', groundDetail: '#5a3c1a',
+      wallHighlight: '#5a4020',
+      rockColor: '#6a4a28', rockHighlight: '#8a6a40',
+      stalColor: '#4a3518', stalHighlight: '#6a5030',
+      particleColor: 'rgba(255,220,150,',
+      torchGlow: 'rgba(255,180,60,', ambientLight: 0.6,
+      flameColor: [255, 180, 60],
+    },
+    night: {
       bgTop: '#08081a', bgBot: '#10102a',
       ceilingFill: '#141430', ceilingLine: '#222250',
       groundFill: '#141430', groundLine: '#222250', groundDetail: '#1a1a3a',
@@ -615,18 +888,147 @@ function getTheme() {
       stalColor: '#181838', stalHighlight: '#262650',
       particleColor: 'rgba(160,160,255,',
       torchGlow: 'rgba(255,150,40,', ambientLight: 0.3,
-    };
+      flameColor: [255, 150, 40],
+    },
+  },
+  { // 1: Crystal Cavern (5-10km)
+    name: 'CRYSTAL CAVERN', nameColor: '#44ffff',
+    day: {
+      bgTop: '#0a2a3a', bgBot: '#103848',
+      ceilingFill: '#0e2838', ceilingLine: '#1a4458',
+      groundFill: '#0e2838', groundLine: '#1a4458', groundDetail: '#123040',
+      wallHighlight: '#1a4060',
+      rockColor: '#1a3a50', rockHighlight: '#2a5a70',
+      stalColor: '#0e2a3a', stalHighlight: '#1a4055',
+      particleColor: 'rgba(100,220,255,',
+      torchGlow: 'rgba(80,200,255,', ambientLight: 0.5,
+      flameColor: [80, 200, 255],
+    },
+    night: {
+      bgTop: '#040e18', bgBot: '#081828',
+      ceilingFill: '#061420', ceilingLine: '#0e2838',
+      groundFill: '#061420', groundLine: '#0e2838', groundDetail: '#081a28',
+      wallHighlight: '#0e2040',
+      rockColor: '#0a1a2a', rockHighlight: '#142a40',
+      stalColor: '#06121e', stalHighlight: '#0e2030',
+      particleColor: 'rgba(60,150,255,',
+      torchGlow: 'rgba(40,140,220,', ambientLight: 0.25,
+      flameColor: [40, 140, 220],
+    },
+  },
+  { // 2: Lava Depths (10-15km)
+    name: 'LAVA DEPTHS', nameColor: '#ff6622',
+    day: {
+      bgTop: '#2a0a00', bgBot: '#4a1800',
+      ceilingFill: '#3a1005', ceilingLine: '#5a2010',
+      groundFill: '#3a1005', groundLine: '#5a2010', groundDetail: '#4a1808',
+      wallHighlight: '#5a2515',
+      rockColor: '#4a2010', rockHighlight: '#6a3020',
+      stalColor: '#3a1508', stalHighlight: '#5a2818',
+      particleColor: 'rgba(255,140,50,',
+      torchGlow: 'rgba(255,100,20,', ambientLight: 0.7,
+      flameColor: [255, 100, 20],
+    },
+    night: {
+      bgTop: '#140500', bgBot: '#280e00',
+      ceilingFill: '#1e0800', ceilingLine: '#3a1508',
+      groundFill: '#1e0800', groundLine: '#3a1508', groundDetail: '#281008',
+      wallHighlight: '#3a1a10',
+      rockColor: '#281008', rockHighlight: '#3a1a15',
+      stalColor: '#1a0a05', stalHighlight: '#2e1510',
+      particleColor: 'rgba(255,80,20,',
+      torchGlow: 'rgba(255,60,10,', ambientLight: 0.35,
+      flameColor: [255, 60, 10],
+    },
+  },
+  { // 3: Frozen Abyss (15-20km)
+    name: 'FROZEN ABYSS', nameColor: '#aaddff',
+    day: {
+      bgTop: '#1a2a3a', bgBot: '#2a4050',
+      ceilingFill: '#223848', ceilingLine: '#3a5868',
+      groundFill: '#223848', groundLine: '#3a5868', groundDetail: '#2a4555',
+      wallHighlight: '#3a5570',
+      rockColor: '#3a5060', rockHighlight: '#5a7888',
+      stalColor: '#2a4050', stalHighlight: '#3a5868',
+      particleColor: 'rgba(200,230,255,',
+      torchGlow: 'rgba(150,200,255,', ambientLight: 0.5,
+      flameColor: [150, 200, 255],
+    },
+    night: {
+      bgTop: '#080e18', bgBot: '#101a28',
+      ceilingFill: '#0e1828', ceilingLine: '#1a2a40',
+      groundFill: '#0e1828', groundLine: '#1a2a40', groundDetail: '#121e30',
+      wallHighlight: '#1a2a44',
+      rockColor: '#141e30', rockHighlight: '#222e44',
+      stalColor: '#0e1620', stalHighlight: '#182838',
+      particleColor: 'rgba(140,180,255,',
+      torchGlow: 'rgba(100,150,220,', ambientLight: 0.2,
+      flameColor: [100, 150, 220],
+    },
+  },
+  { // 4: Void Tunnels (20km+)
+    name: 'THE VOID', nameColor: '#cc66ff',
+    day: {
+      bgTop: '#1a0a2a', bgBot: '#2a1540',
+      ceilingFill: '#221035', ceilingLine: '#3a2055',
+      groundFill: '#221035', groundLine: '#3a2055', groundDetail: '#2a1540',
+      wallHighlight: '#3a2060',
+      rockColor: '#2a1845', rockHighlight: '#3a2860',
+      stalColor: '#1e1030', stalHighlight: '#2e1a48',
+      particleColor: 'rgba(180,120,255,',
+      torchGlow: 'rgba(180,100,255,', ambientLight: 0.55,
+      flameColor: [180, 100, 255],
+    },
+    night: {
+      bgTop: '#0a0414', bgBot: '#140a22',
+      ceilingFill: '#10081a', ceilingLine: '#201030',
+      groundFill: '#10081a', groundLine: '#201030', groundDetail: '#180c22',
+      wallHighlight: '#1a1038',
+      rockColor: '#140a20', rockHighlight: '#201535',
+      stalColor: '#0e0618', stalHighlight: '#1a0e28',
+      particleColor: 'rgba(140,80,255,',
+      torchGlow: 'rgba(120,60,220,', ambientLight: 0.25,
+      flameColor: [120, 60, 220],
+    },
+  },
+];
+
+function getBiomeIndex() {
+  return Math.min(BIOMES.length - 1, Math.floor(game.score / 5000));
+}
+
+function getTheme() {
+  const biomeIdx = getBiomeIndex();
+  // Track biome change for transition
+  if (biomeIdx !== lastBiome) {
+    biomeTransition = 60;
+    lastBiome = biomeIdx;
+    hudPopups.push({
+      text: BIOMES[biomeIdx].name,
+      x: canvas.width / 2,
+      y: canvas.height / 2,
+      vy: -0.8,
+      life: 120,
+      maxLife: 120,
+      color: BIOMES[biomeIdx].nameColor,
+      size: 36,
+      glow: true,
+    });
+    hudPopups.push({
+      text: `${biomeIdx * 5}km REACHED`,
+      x: canvas.width / 2,
+      y: canvas.height / 2 + 40,
+      vy: -0.8,
+      life: 100,
+      maxLife: 100,
+      color: '#ffffff',
+      size: 16,
+      glow: false,
+    });
   }
-  return {
-    bgTop: '#3a2810', bgBot: '#5a3c18',
-    ceilingFill: '#4a3215', ceilingLine: '#6a4a25',
-    groundFill: '#4a3215', groundLine: '#6a4a25', groundDetail: '#5a3c1a',
-    wallHighlight: '#5a4020',
-    rockColor: '#6a4a28', rockHighlight: '#8a6a40',
-    stalColor: '#4a3518', stalHighlight: '#6a5030',
-    particleColor: 'rgba(255,220,150,',
-    torchGlow: 'rgba(255,180,60,', ambientLight: 0.6,
-  };
+  currentBiome = biomeIdx;
+  const biome = BIOMES[biomeIdx];
+  return nightMode ? biome.night : biome.day;
 }
 
 // ===== DRAW =====
@@ -772,6 +1174,76 @@ function draw() {
   }
   ctx.stroke();
 
+  // === BIOME TRANSITION FLASH ===
+  if (biomeTransition > 0) {
+    biomeTransition--;
+    const ba = (biomeTransition / 60);
+    const biome = BIOMES[currentBiome];
+    const bc = biome.nameColor;
+    ctx.fillStyle = `rgba(255,255,255,${ba * 0.3})`;
+    ctx.fillRect(0, 0, W, H);
+    // Colored scan line
+    const scanY = H * (1 - biomeTransition / 60);
+    ctx.strokeStyle = bc;
+    ctx.lineWidth = 3;
+    ctx.globalAlpha = ba * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, scanY);
+    ctx.lineTo(W, scanY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // === Lava glow for Lava Depths biome ===
+  if (currentBiome === 2) {
+    const lavaGlow = Math.sin(game.frame * 0.02) * 0.04 + 0.06;
+    ctx.fillStyle = `rgba(255, 60, 0, ${lavaGlow})`;
+    ctx.fillRect(0, groundY - 10, W, H - groundY + 10);
+    // Lava bubbles
+    for (let lb = 0; lb < 4; lb++) {
+      const lbx = ((game.frame * 0.5 + lb * 200) % W);
+      const lbBob = Math.sin(game.frame * 0.08 + lb * 3) * 5;
+      ctx.fillStyle = `rgba(255, 120, 20, ${0.3 + Math.sin(game.frame * 0.1 + lb) * 0.15})`;
+      ctx.beginPath();
+      ctx.arc(lbx, groundY + 15 + lbBob, 4 + Math.sin(game.frame * 0.15 + lb * 2) * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // === Ice crystals for Frozen Abyss biome ===
+  if (currentBiome === 3) {
+    ctx.globalAlpha = 0.12;
+    for (let ic = 0; ic < 6; ic++) {
+      const icx = ((game.frame * game.speed * 0.3 + ic * 180) % (W + 100)) - 50;
+      const icy = 20 + ic * (H / 7);
+      ctx.strokeStyle = '#aaddff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(icx, icy); ctx.lineTo(icx + 12, icy - 8); ctx.lineTo(icx + 24, icy);
+      ctx.lineTo(icx + 12, icy + 8); ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // === Void swirls for Void Tunnels biome ===
+  if (currentBiome === 4) {
+    ctx.globalAlpha = 0.06;
+    for (let vs = 0; vs < 3; vs++) {
+      const vx = W / 2 + Math.cos(game.frame * 0.005 + vs * 2.1) * W * 0.3;
+      const vy = H / 2 + Math.sin(game.frame * 0.007 + vs * 2.1) * H * 0.25;
+      const vr = 80 + Math.sin(game.frame * 0.01 + vs) * 30;
+      const vGrad = ctx.createRadialGradient(vx, vy, 0, vx, vy, vr);
+      vGrad.addColorStop(0, 'rgba(180,100,255,0.3)');
+      vGrad.addColorStop(1, 'rgba(180,100,255,0)');
+      ctx.fillStyle = vGrad;
+      ctx.beginPath();
+      ctx.arc(vx, vy, vr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   // === JETPACK PARTICLES ===
   for (const p of player.particles) {
     const alpha = p.life / p.maxLife;
@@ -828,14 +1300,76 @@ function draw() {
   for (const o of obstacles) {
     if (o.type === 'boulder') drawBoulder(o);
     else if (o.type === 'rollingStone') drawRollingStone(o);
-    else if (o.type === 'dustCloud') drawDustCloud(o);
-    else if (o.type === 'forkRock') drawForkRock(o);
+else if (o.type === 'forkRock') drawForkRock(o);
   }
 
   // === CRYSTALS ===
   for (const c of coins) {
     if (c.collected) continue;
     drawCrystal(c.x, c.y, c.r, game.frame * 0.04 + c.x * 0.01);
+  }
+
+  // === FUEL CANS ===
+  for (const fc of fuelCans) {
+    if (fc.collected) continue;
+    const bobY = fc.y + Math.sin(fc.bob) * 6;
+    ctx.save();
+    ctx.translate(fc.x, bobY);
+    // Glow
+    ctx.shadowColor = '#44ddff';
+    ctx.shadowBlur = 8 + Math.sin(game.frame * 0.1) * 4;
+    // Can body
+    ctx.fillStyle = '#225588';
+    ctx.beginPath();
+    ctx.roundRect(-fc.w/2, -fc.h/2, fc.w, fc.h, 4);
+    ctx.fill();
+    // Fuel stripe
+    const stripeGrad = ctx.createLinearGradient(0, -fc.h/2, 0, fc.h/2);
+    stripeGrad.addColorStop(0, '#44ddff');
+    stripeGrad.addColorStop(0.5, '#22aacc');
+    stripeGrad.addColorStop(1, '#44ddff');
+    ctx.fillStyle = stripeGrad;
+    ctx.fillRect(-fc.w/2 + 3, -fc.h/2 + 4, fc.w - 6, fc.h - 8);
+    // Nozzle
+    ctx.fillStyle = '#556677';
+    ctx.fillRect(-3, -fc.h/2 - 5, 6, 6);
+    // Lightning bolt icon
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚡', 0, 4);
+    ctx.textAlign = 'left';
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+
+  // === FLOATING POPUPS ===
+  for (const p of hudPopups) {
+    const alpha = Math.min(1, p.life / (p.maxLife * 0.3));
+    const scale = p.glow ? 1 + (1 - p.life / p.maxLife) * 0.3 : 1;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.scale(scale, scale);
+    ctx.globalAlpha = alpha;
+    if (p.glow) {
+      ctx.shadowColor = p.color;
+      ctx.shadowBlur = 20;
+    }
+    ctx.fillStyle = p.color;
+    ctx.font = `bold ${p.size}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText(p.text, 0, 0);
+    ctx.textAlign = 'left';
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  // === LEVEL UP FLASH ===
+  if (levelUpFlash > 0) {
+    const a = (levelUpFlash / 60) * 0.15;
+    ctx.fillStyle = `rgba(200,100,255,${a})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
   // === GAMIFICATION HUD BAR ===
@@ -1088,45 +1622,6 @@ function drawRollingStone(o) {
   }
 }
 
-// ===== DRAW DUST CLOUD =====
-function drawDustCloud(o) {
-  if (!o.active) {
-    const alpha = (Math.sin(game.frame * 0.2) + 1) / 2;
-    ctx.fillStyle = `rgba(150,120,80,${alpha * 0.4})`;
-    for (let i = 0; i < 5; i++) {
-      const px = o.x + i * (o.w / 5) + Math.sin(game.frame * 0.1 + i) * 5;
-      const py = o.y - 15 + Math.sin(game.frame * 0.15 + i * 2) * 8;
-      ctx.beginPath();
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.fillStyle = `rgba(180,140,80,${alpha * 0.45})`;
-    ctx.font = '12px monospace';
-    ctx.fillText('cave-in!', o.x + o.w / 2 - 25, o.y - 25);
-    return;
-  }
-  for (const dp of o.dustParticles) {
-    const dx = o.x + dp.ox + Math.sin(game.frame * 0.05 + dp.ox) * dp.drift * 10;
-    const dy = o.y + dp.oy + Math.cos(game.frame * 0.04 + dp.oy) * 3;
-    const da = 0.3 + Math.sin(game.frame * 0.08 + dp.ox * 0.1) * 0.15;
-    const dg = ctx.createRadialGradient(dx, dy, 0, dx, dy, dp.size);
-    dg.addColorStop(0, `rgba(160,130,90,${da})`);
-    dg.addColorStop(0.6, `rgba(130,100,60,${da * 0.5})`);
-    dg.addColorStop(1, `rgba(100,80,50,0)`);
-    ctx.fillStyle = dg;
-    ctx.beginPath();
-    ctx.arc(dx, dy, dp.size, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.fillStyle = 'rgba(100,80,50,0.5)';
-  for (let i = 0; i < 6; i++) {
-    const pbx = o.x + ((game.frame * 2 + i * 37) % o.w);
-    const pby = o.y + Math.sin(game.frame * 0.1 + i * 5) * 18;
-    ctx.beginPath();
-    ctx.arc(pbx, pby, 2 + (i % 3), 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
 
 function drawForkRock(o) {
   const trunkH = o.h * 0.55;
@@ -1240,145 +1735,350 @@ function drawCrystal(cx, cy, size, rotation) {
 // ===== GAMIFICATION HUD BAR =====
 function drawHUD() {
   const W = canvas.width;
-  const barH = 44;
+  const barH = 52;
   const barY = 4;
 
-  // Full-width semi-transparent bar
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  // Main bar background with gradient border
+  const barGrad = ctx.createLinearGradient(0, barY, 0, barY + barH);
+  barGrad.addColorStop(0, 'rgba(0,0,0,0.55)');
+  barGrad.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = barGrad;
   ctx.beginPath();
-  ctx.roundRect(8, barY, W - 16, barH, 8);
+  ctx.roundRect(8, barY, W - 16, barH, 10);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.roundRect(8, barY, W - 16, barH, 8);
-  ctx.stroke();
+  // Glowing bottom edge
+  const edgeGrad = ctx.createLinearGradient(0, barY + barH - 2, 0, barY + barH);
+  edgeGrad.addColorStop(0, 'rgba(100,180,255,0.3)');
+  edgeGrad.addColorStop(1, 'rgba(100,180,255,0)');
+  ctx.fillStyle = edgeGrad;
+  ctx.fillRect(12, barY + barH - 2, W - 24, 2);
 
-  // === LEFT: Distance with progress bar ===
-  const leftX = 20;
-  // Distance icon (little running figure)
-  ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  ctx.font = 'bold 11px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText('DISTANCE', leftX, barY + 15);
-  // Distance value
+  // === LEFT SECTION: Score + Level + Distance bar ===
+  const leftX = 22;
+  // Rank badge
+  ctx.fillStyle = '#1a1a3a';
+  ctx.beginPath();
+  ctx.arc(leftX + 16, barY + 26, 16, 0, Math.PI * 2);
+  ctx.fill();
+  const rankGrad = ctx.createLinearGradient(leftX, barY + 10, leftX + 32, barY + 42);
+  rankGrad.addColorStop(0, xpLevel >= 5 ? '#ff44ff' : xpLevel >= 3 ? '#44aaff' : '#ffd700');
+  rankGrad.addColorStop(1, xpLevel >= 5 ? '#aa00aa' : xpLevel >= 3 ? '#2266cc' : '#cc8800');
+  ctx.strokeStyle = rankGrad;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(leftX + 16, barY + 26, 16, 0, Math.PI * 2);
+  ctx.stroke();
+  // XP ring around badge
+  const xpProgress = xp / xpToNext;
+  ctx.strokeStyle = xpLevel >= 5 ? '#ff66ff' : xpLevel >= 3 ? '#66ccff' : '#ffdd44';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(leftX + 16, barY + 26, 16, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * xpProgress);
+  ctx.stroke();
+  // Rank number
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 20px monospace';
-  const distStr = Math.floor(game.score) + 'm';
-  ctx.fillText(distStr, leftX, barY + 36);
-  // Milestone progress bar
-  const milestone = 1000;
-  const progress = (game.score % milestone) / milestone;
-  const pbX = leftX + 120;
-  const pbW = 120;
-  const pbY = barY + 22;
-  const pbH = 8;
-  ctx.fillStyle = 'rgba(255,255,255,0.1)';
-  ctx.beginPath();
-  ctx.roundRect(pbX, pbY, pbW, pbH, 4);
-  ctx.fill();
-  const pgGrad = ctx.createLinearGradient(pbX, 0, pbX + pbW * progress, 0);
-  pgGrad.addColorStop(0, '#4488ff');
-  pgGrad.addColorStop(1, '#66bbff');
-  ctx.fillStyle = pgGrad;
-  ctx.beginPath();
-  ctx.roundRect(pbX, pbY, pbW * progress, pbH, 4);
-  ctx.fill();
-  // Milestone label
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.font = '9px monospace';
-  ctx.fillText(`${Math.floor(game.score / milestone + 1)}km`, pbX + pbW + 5, pbY + 8);
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(xpLevel.toString(), leftX + 16, barY + 31);
+  ctx.textAlign = 'left';
 
-  ctx.fillStyle = '#ffcc66';
-  ctx.font = 'bold 11px monospace';
-  ctx.fillText(`LEVEL ${game.level}`, pbX, pbY - 4);
+  // Score
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('SCORE', leftX + 40, barY + 14);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(Math.floor(game.score).toLocaleString(), leftX + 40, barY + 36);
 
-  // === CENTER: Day/Night toggle ===
-  const toggleW = 90;
-  const toggleH = 28;
-  const toggleX = W / 2 - toggleW / 2;
-  const toggleY = barY + 8;
-  ctx.fillStyle = nightMode ? 'rgba(25,25,70,0.9)' : 'rgba(130,95,35,0.9)';
+  // Level badge
+  const lvlColors = ['#44aa44', '#44aaff', '#ffaa00', '#ff4444'];
+  const lvlColor = lvlColors[Math.min(game.level - 1, 3)];
+  const lvlX = leftX + 180;
+  ctx.fillStyle = lvlColor;
+  ctx.globalAlpha = 0.2;
   ctx.beginPath();
-  ctx.roundRect(toggleX, toggleY, toggleW, toggleH, 14);
+  ctx.roundRect(lvlX, barY + 8, 70, 18, 4);
   ctx.fill();
-  ctx.strokeStyle = nightMode ? 'rgba(80,80,180,0.5)' : 'rgba(200,160,60,0.5)';
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = lvlColor;
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.roundRect(toggleX, toggleY, toggleW, toggleH, 14);
+  ctx.roundRect(lvlX, barY + 8, 70, 18, 4);
   ctx.stroke();
-  // Slider knob
-  const knobX = nightMode ? toggleX + toggleW - 24 : toggleX + 6;
+  ctx.fillStyle = lvlColor;
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  const lvlNames = ['EASY', 'MEDIUM', 'HARD', 'INSANE'];
+  ctx.fillText(lvlNames[Math.min(game.level - 1, 3)], lvlX + 35, barY + 21);
+  ctx.textAlign = 'left';
+
+  // Distance progress bar — CHONKY & GLOWY
+  const milestone = 5000;
+  const progress = (game.score % milestone) / milestone;
+  const biomeIdx = getBiomeIndex();
+  const nextBiomeName = biomeIdx < BIOMES.length - 1 ? BIOMES[biomeIdx + 1].name : 'MAX';
+  const biomeColor = BIOMES[biomeIdx].nameColor;
+  const dpX = lvlX;
+  const dpW = 140;
+  const dpY = barY + 32;
+  const dpH = 14;
+
+  // Bar background with inner shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.roundRect(dpX - 1, dpY - 1, dpW + 2, dpH + 2, 8);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.beginPath();
+  ctx.roundRect(dpX, dpY, dpW, dpH, 7);
+  ctx.fill();
+
+  // Filled portion with gradient + glow
+  const fillW = Math.max(6, dpW * progress);
+  const dpGrad = ctx.createLinearGradient(dpX, 0, dpX + fillW, 0);
+  dpGrad.addColorStop(0, biomeColor);
+  dpGrad.addColorStop(0.7, '#ffffff');
+  dpGrad.addColorStop(1, biomeColor);
+  ctx.shadowColor = biomeColor;
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = dpGrad;
+  ctx.beginPath();
+  ctx.roundRect(dpX, dpY, fillW, dpH, 7);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Animated shine sweep
+  const shineX = dpX + ((game.frame * 1.5) % (dpW + 40)) - 20;
+  if (shineX < dpX + fillW) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(dpX, dpY, fillW, dpH, 7);
+    ctx.clip();
+    const shineGrad = ctx.createLinearGradient(shineX - 15, 0, shineX + 15, 0);
+    shineGrad.addColorStop(0, 'rgba(255,255,255,0)');
+    shineGrad.addColorStop(0.5, 'rgba(255,255,255,0.35)');
+    shineGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = shineGrad;
+    ctx.fillRect(shineX - 15, dpY, 30, dpH);
+    ctx.restore();
+  }
+
+  // Inner highlight line at top
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(dpX + 4, dpY + 2);
+  ctx.lineTo(dpX + fillW - 4, dpY + 2);
+  ctx.stroke();
+
+  // Border glow
+  ctx.strokeStyle = biomeColor + '55';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(dpX, dpY, dpW, dpH, 7);
+  ctx.stroke();
+
+  // Km markers (little ticks)
+  for (let km = 1; km < 5; km++) {
+    const tickX = dpX + (dpW / 5) * km;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(tickX, dpY + 2, 1, dpH - 4);
+  }
+
+  // Percentage text inside bar
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.floor(progress * 100)}%`, dpX + dpW / 2, dpY + 11);
+  ctx.textAlign = 'left';
+
+  // Next biome label
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = '8px monospace';
+  ctx.fillText(`${nextBiomeName}`, dpX + dpW + 6, dpY + 10);
+
+  // Current biome name (tiny, above bar)
+  ctx.fillStyle = biomeColor;
+  ctx.font = 'bold 8px monospace';
+  ctx.fillText(BIOMES[biomeIdx].name, dpX, dpY - 3);
+
+  // === CENTER: Combo + Day/Night Toggle ===
+  const centerX = W / 2;
+
+  // Combo display (above toggle if active)
+  if (combo > 1) {
+    const comboScale = 1 + Math.sin(game.frame * 0.2) * 0.05;
+    const comboColors = ['#ffd700', '#ffd700', '#66ffff', '#66ffff', '#ff66ff', '#ff66ff', '#ff66ff', '#ff2222', '#ff2222', '#ff2222', '#ff0000'];
+    const cc = comboColors[Math.min(combo, 10)];
+    ctx.save();
+    ctx.translate(centerX, barY + 14);
+    ctx.scale(comboScale, comboScale);
+    ctx.shadowColor = cc;
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = cc;
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${combo}x COMBO`, 0, 0);
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+    ctx.restore();
+    // Combo timer bar
+    const ctW = 60;
+    const ctH = 3;
+    const ctX = centerX - ctW / 2;
+    const ctY = barY + 18;
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(ctX, ctY, ctW, ctH);
+    ctx.fillStyle = cc;
+    ctx.fillRect(ctX, ctY, ctW * (comboTimer / 90), ctH);
+  }
+
+  // Day/Night toggle
+  const toggleW = 80;
+  const toggleH = 24;
+  const toggleX = centerX - toggleW / 2;
+  const toggleY = barY + (combo > 1 ? 26 : 14);
+  ctx.fillStyle = nightMode ? 'rgba(20,20,60,0.9)' : 'rgba(110,80,30,0.9)';
+  ctx.beginPath();
+  ctx.roundRect(toggleX, toggleY, toggleW, toggleH, 12);
+  ctx.fill();
+  ctx.strokeStyle = nightMode ? 'rgba(80,80,180,0.4)' : 'rgba(200,160,60,0.4)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(toggleX, toggleY, toggleW, toggleH, 12);
+  ctx.stroke();
+  const knobX = nightMode ? toggleX + toggleW - 21 : toggleX + 5;
   ctx.fillStyle = nightMode ? '#6666cc' : '#ffcc33';
   ctx.beginPath();
-  ctx.arc(knobX + 9, toggleY + 14, 10, 0, Math.PI * 2);
+  ctx.arc(knobX + 8, toggleY + 12, 8, 0, Math.PI * 2);
   ctx.fill();
   if (nightMode) {
-    // Moon cutout
-    ctx.fillStyle = 'rgba(25,25,70,1)';
+    ctx.fillStyle = 'rgba(20,20,60,1)';
     ctx.beginPath();
-    ctx.arc(knobX + 13, toggleY + 11, 8, 0, Math.PI * 2);
+    ctx.arc(knobX + 11, toggleY + 10, 7, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    // Sun rays
-    ctx.strokeStyle = '#ffcc33'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#ffcc33'; ctx.lineWidth = 1.2;
     for (let r = 0; r < 6; r++) {
       const ra = (Math.PI * 2 / 6) * r + game.frame * 0.02;
       ctx.beginPath();
-      ctx.moveTo(knobX + 9 + Math.cos(ra) * 12, toggleY + 14 + Math.sin(ra) * 12);
-      ctx.lineTo(knobX + 9 + Math.cos(ra) * 15, toggleY + 14 + Math.sin(ra) * 15);
+      ctx.moveTo(knobX + 8 + Math.cos(ra) * 10, toggleY + 12 + Math.sin(ra) * 10);
+      ctx.lineTo(knobX + 8 + Math.cos(ra) * 13, toggleY + 12 + Math.sin(ra) * 13);
       ctx.stroke();
     }
   }
 
-  // === RIGHT: Crystals + Scale ===
+  // Best score (subtle, under toggle)
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`BEST: ${game.highScore.toLocaleString()}m`, centerX, barY + barH - 2);
+  ctx.textAlign = 'left';
+
+  // === RIGHT SECTION: Crystals + Near Misses ===
   ctx.textAlign = 'right';
-  const rightX = W - 20;
-  // Crystal icon
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 11px monospace';
-  ctx.fillText('CRYSTALS', rightX, barY + 15);
-  // Crystal count with icon
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 20px monospace';
-  ctx.fillText(game.crystalsCollected.toString(), rightX - 70, barY + 36);
-  // Diamond icon next to count
+  const rightX = W - 22;
+
+  // Crystal counter
+  ctx.fillStyle = 'rgba(255,215,0,0.5)';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('CRYSTALS', rightX, barY + 14);
+  // Animated crystal icon
+  const cRot = game.frame * 0.06;
+  const cScale = Math.abs(Math.cos(cRot));
   ctx.save();
-  ctx.translate(rightX - 55, barY + 28);
+  ctx.translate(rightX - 90, barY + 30);
   ctx.fillStyle = '#ffd700';
   ctx.beginPath();
-  ctx.moveTo(0, -6); ctx.lineTo(5, 0); ctx.lineTo(0, 6); ctx.lineTo(-5, 0);
+  ctx.moveTo(0, -8); ctx.lineTo(6 * cScale, 0); ctx.lineTo(0, 8); ctx.lineTo(-6 * cScale, 0);
   ctx.closePath();
   ctx.fill();
+  ctx.strokeStyle = 'rgba(255,230,100,0.6)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -8); ctx.lineTo(6 * cScale, 0); ctx.lineTo(0, 8); ctx.lineTo(-6 * cScale, 0);
+  ctx.closePath();
+  ctx.stroke();
   ctx.restore();
-  // Scale indicator bar
-  const scaleBarW = 80;
-  const scaleBarX = rightX - scaleBarW;
-  const scaleBarY = barY + 22;
-  const scaleBarH = 8;
-  ctx.fillStyle = 'rgba(255,255,255,0.1)';
-  ctx.beginPath();
-  ctx.roundRect(scaleBarX, scaleBarY, scaleBarW, scaleBarH, 4);
-  ctx.fill();
-  const scaleProgress = Math.min(1, (player.scale - 1) / 0.5);
-  const scGrad = ctx.createLinearGradient(scaleBarX, 0, scaleBarX + scaleBarW * scaleProgress, 0);
-  scGrad.addColorStop(0, '#ffd700');
-  scGrad.addColorStop(1, '#ffaa00');
-  ctx.fillStyle = scGrad;
-  ctx.beginPath();
-  ctx.roundRect(scaleBarX, scaleBarY, scaleBarW * scaleProgress, scaleBarH, 4);
-  ctx.fill();
-  // Scale label
-  ctx.fillStyle = 'rgba(255,215,0,0.5)';
-  ctx.font = '9px monospace';
-  ctx.fillText(`${player.scale.toFixed(3)}x`, scaleBarX - 5, scaleBarY + 8);
+  // Count
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(game.crystalsCollected.toString(), rightX - 100, barY + 36);
 
-  // Best score indicator (small, subtle)
-  ctx.fillStyle = 'rgba(255,255,255,0.25)';
-  ctx.font = '9px monospace';
+  // Near miss counter
+  if (nearMissCount > 0) {
+    ctx.fillStyle = '#44ff44';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText(`DODGES: ${nearMissCount}`, rightX, barY + 48);
+  }
+
+  // Fuel gauge (vertical bar on far right)
+  ctx.textAlign = 'left';
+  const fgX = W - 30;
+  const fgY = barY + barH + 10;
+  const fgW = 18;
+  const fgH = canvas.height - fgY - 60;
+  const fuelPct = fuel / fuelMax;
+
+  // Background
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.roundRect(fgX - 1, fgY - 1, fgW + 2, fgH + 2, 6);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  ctx.beginPath();
+  ctx.roundRect(fgX, fgY, fgW, fgH, 5);
+  ctx.fill();
+
+  // Filled portion (fills from bottom up)
+  const fillH = Math.max(4, fgH * fuelPct);
+  const fuelColor = fuelPct > 0.5 ? '#44ddff' : fuelPct > 0.25 ? '#ffaa22' : '#ff3333';
+  const fuelGrad = ctx.createLinearGradient(0, fgY + fgH - fillH, 0, fgY + fgH);
+  fuelGrad.addColorStop(0, fuelColor);
+  fuelGrad.addColorStop(0.5, '#ffffff');
+  fuelGrad.addColorStop(1, fuelColor);
+
+  // Glow when boosted or warning flash
+  if (fuelBoost > 0) {
+    ctx.shadowColor = '#44ffff';
+    ctx.shadowBlur = 15;
+  } else if (fuelWarning > 0) {
+    ctx.shadowColor = '#ff3333';
+    ctx.shadowBlur = 12;
+  }
+  ctx.fillStyle = fuelGrad;
+  ctx.beginPath();
+  ctx.roundRect(fgX, fgY + fgH - fillH, fgW, fillH, 5);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Tick marks
+  for (let t = 1; t < 4; t++) {
+    const ty = fgY + (fgH / 4) * t;
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(fgX + 2, ty, fgW - 4, 1);
+  }
+
+  // Border
+  ctx.strokeStyle = fuelPct > 0.25 ? 'rgba(68,221,255,0.3)' : 'rgba(255,50,50,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(fgX, fgY, fgW, fgH, 5);
+  ctx.stroke();
+
+  // Label
+  ctx.save();
+  ctx.translate(fgX + fgW / 2, fgY - 4);
+  ctx.fillStyle = fuelPct > 0.25 ? '#44ddff' : '#ff3333';
+  ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(`BEST: ${game.highScore}m`, W / 2, barY + barH - 2);
+  ctx.fillText('FUEL', 0, 0);
+  ctx.restore();
 
+  // Percentage
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.floor(fuelPct * 100)}%`, fgX + fgW / 2, fgY + fgH + 12);
   ctx.textAlign = 'left';
 }
 
@@ -1386,35 +2086,109 @@ function drawHUD() {
 function drawMenu() {
   const W = canvas.width;
   const H = canvas.height;
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Animated vignette
+  const vig = ctx.createRadialGradient(W/2, H/2, H*0.2, W/2, H/2, H*0.8);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = vig;
   ctx.fillRect(0, 0, W, H);
 
   ctx.textAlign = 'center';
   const cy = H / 2;
 
+  // Title with glow
+  ctx.shadowColor = '#ffd700';
+  ctx.shadowBlur = 30;
   ctx.fillStyle = '#ffd700';
   ctx.font = `bold ${Math.min(W * 0.07, 56)}px monospace`;
-  ctx.fillText('GOLD DIGGER', W / 2, cy - 80);
+  ctx.fillText('GOLD DIGGER', W / 2, cy - 90);
+  ctx.shadowBlur = 0;
+
   ctx.fillStyle = '#aa7733';
-  ctx.font = `bold ${Math.min(W * 0.04, 30)}px monospace`;
-  ctx.fillText('UNDERGROUND', W / 2, cy - 42);
+  ctx.font = `bold ${Math.min(W * 0.035, 28)}px monospace`;
+  ctx.fillText('UNDERGROUND', W / 2, cy - 52);
 
-  ctx.fillStyle = '#999';
-  ctx.font = `${Math.min(W * 0.02, 15)}px monospace`;
-  ctx.fillText('Hold SPACE / CLICK / TAP to fly', W / 2, cy + 10);
-  ctx.fillText('Start easy, then every 1km the cave gets meaner', W / 2, cy + 32);
-  ctx.fillText('Collect crystals  |  Avoid stones, cave-ins and fork rocks', W / 2, cy + 54);
-  ctx.fillText('Press N or click toggle for Day/Night', W / 2, cy + 76);
+  // Animated pickaxe divider
+  const divW = 200;
+  ctx.strokeStyle = 'rgba(255,215,0,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(W/2 - divW/2, cy - 35);
+  ctx.lineTo(W/2 + divW/2, cy - 35);
+  ctx.stroke();
+  // Animated crystal in center of divider
+  const dCrot = game.frame * 0.05;
+  ctx.save();
+  ctx.translate(W/2, cy - 35);
+  ctx.fillStyle = '#ffd700';
+  const dCS = Math.abs(Math.cos(dCrot));
+  ctx.beginPath();
+  ctx.moveTo(0, -6); ctx.lineTo(5 * dCS, 0); ctx.lineTo(0, 6); ctx.lineTo(-5 * dCS, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 
-  const alpha = (Math.sin(game.frame * 0.05) + 1) / 2;
-  ctx.fillStyle = `rgba(255,255,255,${0.5 + alpha * 0.5})`;
-  ctx.font = `bold ${Math.min(W * 0.03, 24)}px monospace`;
-  ctx.fillText('TAP TO START', W / 2, cy + 116);
+  // Feature cards
+  const cardData = [
+    { icon: 'SPACE', text: 'Hold to fly', color: '#66aaff' },
+    { icon: 'xCOMBO', text: 'Chain crystals', color: '#ff66ff' },
+    { icon: 'DODGE', text: 'Near miss bonus', color: '#44ff44' },
+    { icon: 'N', text: 'Toggle day/night', color: '#ffcc33' },
+  ];
+  const cardW = Math.min(150, (W - 80) / 4);
+  const cardStartX = W / 2 - (cardW * 4 + 20 * 3) / 2;
+  const cardY = cy - 15;
+  for (let i = 0; i < 4; i++) {
+    const cd = cardData[i];
+    const cx = cardStartX + i * (cardW + 20);
+    const bobY = Math.sin(game.frame * 0.03 + i * 1.2) * 3;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.beginPath();
+    ctx.roundRect(cx, cardY + bobY, cardW, 55, 6);
+    ctx.fill();
+    ctx.strokeStyle = `${cd.color}44`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(cx, cardY + bobY, cardW, 55, 6);
+    ctx.stroke();
+
+    ctx.fillStyle = cd.color;
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(cd.icon, cx + cardW / 2, cardY + bobY + 22);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '10px monospace';
+    ctx.fillText(cd.text, cx + cardW / 2, cardY + bobY + 42);
+  }
+
+  // Start button
+  const alpha = (Math.sin(game.frame * 0.06) + 1) / 2;
+  const btnW = 220;
+  const btnH = 44;
+  const btnX = W / 2 - btnW / 2;
+  const btnY = cy + 65;
+  ctx.fillStyle = `rgba(255,215,0,${0.15 + alpha * 0.1})`;
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255,215,0,${0.5 + alpha * 0.5})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.stroke();
+  ctx.fillStyle = `rgba(255,255,255,${0.7 + alpha * 0.3})`;
+  ctx.font = `bold ${Math.min(W * 0.025, 20)}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('TAP TO START', W / 2, btnY + 28);
 
   if (game.highScore > 0) {
-    ctx.fillStyle = '#ffd700';
-    ctx.font = '14px monospace';
-    ctx.fillText(`High Score: ${game.highScore}m`, W / 2, cy + 156);
+    ctx.fillStyle = 'rgba(255,215,0,0.6)';
+    ctx.font = '13px monospace';
+    ctx.fillText(`HIGH SCORE: ${game.highScore.toLocaleString()}m`, W / 2, btnY + btnH + 30);
   }
   ctx.textAlign = 'left';
 }
@@ -1423,35 +2197,97 @@ function drawMenu() {
 function drawDeath() {
   const W = canvas.width;
   const H = canvas.height;
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+
+  // Dark overlay with red tint
+  ctx.fillStyle = 'rgba(20,0,0,0.6)';
   ctx.fillRect(0, 0, W, H);
 
   ctx.textAlign = 'center';
   const cy = H / 2;
 
+  // CRUSHED with shake effect
+  const shk = game.state === 'dead' && screenShake > 0 ? screenShake * 0.5 : 0;
+  ctx.save();
+  ctx.translate((Math.random()-0.5)*shk, (Math.random()-0.5)*shk);
+  ctx.shadowColor = '#ff0000';
+  ctx.shadowBlur = 20;
   ctx.fillStyle = '#ff3333';
-  ctx.font = `bold ${Math.min(W * 0.06, 48)}px monospace`;
-  ctx.fillText('CRUSHED!', W / 2, cy - 60);
+  ctx.font = `bold ${Math.min(W * 0.07, 52)}px monospace`;
+  ctx.fillText('CRUSHED!', W / 2, cy - 100);
+  ctx.shadowBlur = 0;
+  ctx.restore();
 
-  ctx.fillStyle = '#fff';
-  ctx.font = `${Math.min(W * 0.03, 24)}px monospace`;
-  ctx.fillText(`Distance: ${Math.floor(game.score)}m`, W / 2, cy - 10);
+  // Stats card
+  const cardW = Math.min(380, W * 0.5);
+  const cardH = 180;
+  const cardX = W / 2 - cardW / 2;
+  const cardY = cy - 70;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.roundRect(cardX, cardY, cardW, cardH, 12);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(cardX, cardY, cardW, cardH, 12);
+  ctx.stroke();
 
-  ctx.fillStyle = '#ffd700';
-  ctx.font = `${Math.min(W * 0.022, 18)}px monospace`;
-  ctx.fillText(`Crystals: ${game.crystalsCollected}`, W / 2, cy + 22);
+  // Stats rows
+  const statY = cardY + 25;
+  const statGap = 30;
+  const stats = [
+    { label: 'DISTANCE', value: `${Math.floor(game.score).toLocaleString()}m`, color: '#66aaff', icon: null },
+    { label: 'CRYSTALS', value: game.crystalsCollected.toString(), color: '#ffd700', icon: null },
+    { label: 'MAX COMBO', value: `${maxCombo}x`, color: '#ff66ff', icon: null },
+    { label: 'FUEL LEFT', value: `${Math.floor(fuel)}%`, color: '#44ddff', icon: null },
+    { label: 'NEAR MISSES', value: nearMissCount.toString(), color: '#44ff44', icon: null },
+    { label: 'RANK', value: `Level ${xpLevel}`, color: xpLevel >= 5 ? '#ff44ff' : xpLevel >= 3 ? '#44aaff' : '#ffd700', icon: null },
+  ];
 
-  if (game.score >= game.highScore && game.score > 0) {
-    ctx.fillStyle = '#ffd700';
-    ctx.font = `bold ${Math.min(W * 0.022, 18)}px monospace`;
-    ctx.fillText('NEW HIGH SCORE!', W / 2, cy + 52);
+  for (let i = 0; i < stats.length; i++) {
+    const s = stats[i];
+    const sy = statY + i * statGap;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(s.label, cardX + 20, sy);
+    ctx.fillStyle = s.color;
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(s.value, cardX + cardW - 20, sy);
   }
 
-  const alpha = (Math.sin(game.frame * 0.05) + 1) / 2;
-  ctx.fillStyle = `rgba(255,255,255,${0.5 + alpha * 0.5})`;
-  ctx.font = `bold ${Math.min(W * 0.028, 22)}px monospace`;
-  ctx.fillText('TAP TO RETRY', W / 2, cy + 95);
+  // New high score banner
+  if (game.score >= game.highScore && game.score > 0) {
+    const bannerAlpha = (Math.sin(game.frame * 0.08) + 1) / 2;
+    ctx.shadowColor = '#ffd700';
+    ctx.shadowBlur = 15;
+    ctx.fillStyle = `rgba(255,215,0,${0.7 + bannerAlpha * 0.3})`;
+    ctx.font = `bold ${Math.min(W * 0.025, 20)}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText('NEW HIGH SCORE!', W / 2, cardY + cardH + 25);
+    ctx.shadowBlur = 0;
+  }
 
+  // Retry button
+  const alpha = (Math.sin(game.frame * 0.06) + 1) / 2;
+  const btnW = 200;
+  const btnH = 40;
+  const btnX = W / 2 - btnW / 2;
+  const btnY = cardY + cardH + (game.score >= game.highScore && game.score > 0 ? 40 : 20);
+  ctx.fillStyle = `rgba(255,100,100,${0.1 + alpha * 0.1})`;
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255,100,100,${0.5 + alpha * 0.5})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.stroke();
+  ctx.fillStyle = `rgba(255,255,255,${0.7 + alpha * 0.3})`;
+  ctx.font = `bold ${Math.min(W * 0.025, 20)}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('TAP TO RETRY', W / 2, btnY + 26);
   ctx.textAlign = 'left';
 }
 
