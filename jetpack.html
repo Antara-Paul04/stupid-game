@@ -201,6 +201,7 @@ function getCanvasCoords(clientX, clientY) {
 document.addEventListener('mousedown', (e) => {
   resumeAudio();
   const {x: mx, y: my} = getCanvasCoords(e.clientX, e.clientY);
+  if (game.state === 'dead') { handleInput(mx, my); return; }
   const toggleX = canvas.width / 2 - 50;
   if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 60) {
     nightMode = !nightMode;
@@ -208,7 +209,7 @@ document.addEventListener('mousedown', (e) => {
   }
   inputDown = true;
   mouseTarget = { x: mx, y: my, active: true };
-  handleInput();
+  handleInput(mx, my);
 });
 document.addEventListener('mousemove', (e) => {
   if (inputDown) {
@@ -220,6 +221,7 @@ document.addEventListener('mouseup', () => { inputDown = false; mouseTarget.acti
 document.addEventListener('touchstart', (e) => {
   e.preventDefault(); resumeAudio();
   const {x: mx, y: my} = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
+  if (game.state === 'dead') { handleInput(mx, my); return; }
   const toggleX = canvas.width / 2 - 50;
   if (mx >= toggleX && mx <= toggleX + 100 && my >= 6 && my <= 60) {
     nightMode = !nightMode;
@@ -227,7 +229,7 @@ document.addEventListener('touchstart', (e) => {
   }
   inputDown = true;
   mouseTarget = { x: mx, y: my, active: true };
-  handleInput();
+  handleInput(mx, my);
 });
 document.addEventListener('touchmove', (e) => {
   e.preventDefault();
@@ -238,7 +240,8 @@ document.addEventListener('touchmove', (e) => {
 });
 document.addEventListener('touchend', (e) => { e.preventDefault(); inputDown = false; mouseTarget.active = false; });
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); resumeAudio(); keys.up = true; inputDown = true; handleInput(); }
+  if (game.state === 'dead' && (e.code === 'Space' || e.code === 'Enter')) { e.preventDefault(); startGame(); return; }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') { e.preventDefault(); resumeAudio(); keys.up = true; inputDown = true; handleInput(-1, -1); }
   if (e.code === 'ArrowDown' || e.code === 'KeyS') { e.preventDefault(); keys.down = true; }
   if (e.code === 'ArrowLeft' || e.code === 'KeyA') { e.preventDefault(); keys.left = true; }
   if (e.code === 'ArrowRight' || e.code === 'KeyD') { e.preventDefault(); keys.right = true; }
@@ -251,9 +254,22 @@ document.addEventListener('keyup', (e) => {
   if (e.code === 'ArrowRight' || e.code === 'KeyD') { keys.right = false; }
 });
 
-function handleInput() {
+function handleInput(mx, my) {
   if (game.state === 'menu') startGame();
-  else if (game.state === 'dead') startGame();
+  else if (game.state === 'dead' && shareCardReady) {
+    // Check share button
+    if (mx >= shareBtn.x && mx <= shareBtn.x + shareBtn.w && my >= shareBtn.y && my <= shareBtn.y + shareBtn.h) {
+      shareCard();
+      return;
+    }
+    // Check retry button
+    if (mx >= retryBtn.x && mx <= retryBtn.x + retryBtn.w && my >= retryBtn.y && my <= retryBtn.y + retryBtn.h) {
+      startGame();
+      return;
+    }
+  } else if (game.state === 'dead') {
+    startGame();
+  }
 }
 
 function startGame() {
@@ -289,6 +305,7 @@ function startGame() {
   fuelCans = [];
   fuelWarning = 0;
   fuelBoost = 0;
+  shareCardReady = false;
   currentBiome = 0;
   lastBiome = 0;
   biomeTransition = 0;
@@ -2194,101 +2211,386 @@ function drawMenu() {
 }
 
 // ===== DEATH =====
+// Share card state
+let shareCardReady = false;
+let shareBtn = { x: 0, y: 0, w: 0, h: 0 };
+let retryBtn = { x: 0, y: 0, w: 0, h: 0 };
+
+function getRankTitle(level) {
+  const titles = ['Rookie Miner', 'Tunnel Rat', 'Shaft Diver', 'Ore Hunter', 'Vein Striker',
+    'Deep Driller', 'Cave Master', 'Gold Baron', 'Diamond Hand', 'Legendary Digger'];
+  return titles[Math.min(level - 1, titles.length - 1)];
+}
+
+function getBiomeName() {
+  const idx = getBiomeIndex();
+  return BIOMES[Math.min(idx, BIOMES.length - 1)].name;
+}
+
 function drawDeath() {
   const W = canvas.width;
   const H = canvas.height;
 
-  // Dark overlay with red tint
-  ctx.fillStyle = 'rgba(20,0,0,0.6)';
+  // Dark overlay
+  ctx.fillStyle = 'rgba(10,5,0,0.7)';
   ctx.fillRect(0, 0, W, H);
 
-  ctx.textAlign = 'center';
   const cy = H / 2;
+  ctx.textAlign = 'center';
 
-  // CRUSHED with shake effect
-  const shk = game.state === 'dead' && screenShake > 0 ? screenShake * 0.5 : 0;
+  // CRUSHED with shake
+  const shk = screenShake > 0 ? screenShake * 0.5 : 0;
   ctx.save();
   ctx.translate((Math.random()-0.5)*shk, (Math.random()-0.5)*shk);
   ctx.shadowColor = '#ff0000';
   ctx.shadowBlur = 20;
   ctx.fillStyle = '#ff3333';
-  ctx.font = `bold ${Math.min(W * 0.07, 52)}px monospace`;
-  ctx.fillText('CRUSHED!', W / 2, cy - 100);
+  ctx.font = `bold ${Math.min(W * 0.06, 48)}px monospace`;
+  ctx.fillText('CRUSHED!', W / 2, cy - 180);
   ctx.shadowBlur = 0;
   ctx.restore();
 
-  // Stats card
-  const cardW = Math.min(380, W * 0.5);
-  const cardH = 180;
+  // === SHARE CARD ===
+  const cardW = Math.min(420, W * 0.55);
+  const cardH = 340;
   const cardX = W / 2 - cardW / 2;
-  const cardY = cy - 70;
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  const cardY = cy - 150;
+
+  // Card background — dark gold parchment feel
+  const cardBg = ctx.createLinearGradient(cardX, cardY, cardX, cardY + cardH);
+  cardBg.addColorStop(0, 'rgba(40,30,10,0.92)');
+  cardBg.addColorStop(0.5, 'rgba(50,35,15,0.95)');
+  cardBg.addColorStop(1, 'rgba(30,20,8,0.92)');
+  ctx.fillStyle = cardBg;
   ctx.beginPath();
-  ctx.roundRect(cardX, cardY, cardW, cardH, 12);
+  ctx.roundRect(cardX, cardY, cardW, cardH, 16);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+
+  // Gold border with glow
+  ctx.shadowColor = '#ffd700';
+  ctx.shadowBlur = 12;
+  const borderGrad = ctx.createLinearGradient(cardX, cardY, cardX + cardW, cardY + cardH);
+  borderGrad.addColorStop(0, '#cc8800');
+  borderGrad.addColorStop(0.3, '#ffd700');
+  borderGrad.addColorStop(0.7, '#ffee88');
+  borderGrad.addColorStop(1, '#cc8800');
+  ctx.strokeStyle = borderGrad;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(cardX, cardY, cardW, cardH, 16);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Inner decorative border
+  ctx.strokeStyle = 'rgba(255,215,0,0.15)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.roundRect(cardX, cardY, cardW, cardH, 12);
+  ctx.roundRect(cardX + 6, cardY + 6, cardW - 12, cardH - 12, 12);
   ctx.stroke();
 
-  // Stats rows
-  const statY = cardY + 25;
-  const statGap = 30;
-  const stats = [
-    { label: 'DISTANCE', value: `${Math.floor(game.score).toLocaleString()}m`, color: '#66aaff', icon: null },
-    { label: 'CRYSTALS', value: game.crystalsCollected.toString(), color: '#ffd700', icon: null },
-    { label: 'MAX COMBO', value: `${maxCombo}x`, color: '#ff66ff', icon: null },
-    { label: 'FUEL LEFT', value: `${Math.floor(fuel)}%`, color: '#44ddff', icon: null },
-    { label: 'NEAR MISSES', value: nearMissCount.toString(), color: '#44ff44', icon: null },
-    { label: 'RANK', value: `Level ${xpLevel}`, color: xpLevel >= 5 ? '#ff44ff' : xpLevel >= 3 ? '#44aaff' : '#ffd700', icon: null },
+  // Corner pickaxe decorations
+  const corners = [[cardX + 16, cardY + 16], [cardX + cardW - 16, cardY + 16],
+                   [cardX + 16, cardY + cardH - 16], [cardX + cardW - 16, cardY + cardH - 16]];
+  ctx.fillStyle = '#ffd700';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  for (const [cx2, cy2] of corners) {
+    ctx.fillText('⛏', cx2, cy2 + 5);
+  }
+
+  // Title: GOLD DIGGER
+  const titleY = cardY + 38;
+  ctx.shadowColor = '#ffd700';
+  ctx.shadowBlur = 15;
+  ctx.fillStyle = '#ffd700';
+  ctx.font = `bold ${Math.min(cardW * 0.08, 28)}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('GOLD DIGGER', W / 2, titleY);
+  ctx.shadowBlur = 0;
+
+  // Rank title
+  const rankTitle = getRankTitle(xpLevel);
+  ctx.fillStyle = xpLevel >= 5 ? '#ff66ff' : xpLevel >= 3 ? '#66ccff' : '#ffcc44';
+  ctx.font = `bold ${Math.min(cardW * 0.05, 16)}px monospace`;
+  ctx.fillText(rankTitle, W / 2, titleY + 22);
+
+  // Divider line
+  const divY = titleY + 32;
+  const divGrad = ctx.createLinearGradient(cardX + 30, 0, cardX + cardW - 30, 0);
+  divGrad.addColorStop(0, 'rgba(255,215,0,0)');
+  divGrad.addColorStop(0.3, 'rgba(255,215,0,0.5)');
+  divGrad.addColorStop(0.5, 'rgba(255,230,100,0.8)');
+  divGrad.addColorStop(0.7, 'rgba(255,215,0,0.5)');
+  divGrad.addColorStop(1, 'rgba(255,215,0,0)');
+  ctx.fillStyle = divGrad;
+  ctx.fillRect(cardX + 30, divY, cardW - 60, 1.5);
+
+  // Big distance display
+  const distY = divY + 35;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('DISTANCE MINED', W / 2, distY - 8);
+  ctx.shadowColor = '#66aaff';
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = '#88ccff';
+  ctx.font = `bold ${Math.min(cardW * 0.1, 36)}px monospace`;
+  ctx.fillText(`${Math.floor(game.score).toLocaleString()}m`, W / 2, distY + 22);
+  ctx.shadowBlur = 0;
+
+  // Biome reached
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.font = '9px monospace';
+  ctx.fillText(`Reached: ${getBiomeName()}`, W / 2, distY + 38);
+
+  // Stats grid (2 columns)
+  const gridY = distY + 58;
+  const colW = (cardW - 60) / 2;
+  const gridStats = [
+    { label: 'CRYSTALS', value: game.crystalsCollected.toString(), color: '#ffd700', emoji: '💎' },
+    { label: 'MAX COMBO', value: `${maxCombo}x`, color: '#ff66ff', emoji: '🔥' },
+    { label: 'FUEL LEFT', value: `${Math.floor(fuel)}%`, color: '#44ddff', emoji: '⛽' },
+    { label: 'DODGES', value: nearMissCount.toString(), color: '#44ff44', emoji: '💨' },
+    { label: 'RANK', value: `Lv.${xpLevel}`, color: xpLevel >= 5 ? '#ff44ff' : xpLevel >= 3 ? '#44aaff' : '#ffd700', emoji: '⭐' },
+    { label: 'SCALE', value: `${player.scale.toFixed(2)}x`, color: '#ffaa44', emoji: '📏' },
   ];
 
-  for (let i = 0; i < stats.length; i++) {
-    const s = stats[i];
-    const sy = statY + i * statGap;
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.font = 'bold 11px monospace';
+  for (let i = 0; i < gridStats.length; i++) {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const sx = cardX + 30 + col * colW;
+    const sy = gridY + row * 30;
+    const s = gridStats[i];
+
     ctx.textAlign = 'left';
-    ctx.fillText(s.label, cardX + 20, sy);
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '9px monospace';
+    ctx.fillText(`${s.emoji} ${s.label}`, sx, sy);
     ctx.fillStyle = s.color;
-    ctx.font = 'bold 16px monospace';
-    ctx.textAlign = 'right';
-    ctx.fillText(s.value, cardX + cardW - 20, sy);
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText(s.value, sx, sy + 16);
   }
 
   // New high score banner
   if (game.score >= game.highScore && game.score > 0) {
     const bannerAlpha = (Math.sin(game.frame * 0.08) + 1) / 2;
+    const bannerY = cardY + cardH - 22;
     ctx.shadowColor = '#ffd700';
-    ctx.shadowBlur = 15;
-    ctx.fillStyle = `rgba(255,215,0,${0.7 + bannerAlpha * 0.3})`;
-    ctx.font = `bold ${Math.min(W * 0.025, 20)}px monospace`;
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = `rgba(255,215,0,${0.8 + bannerAlpha * 0.2})`;
+    ctx.font = `bold 13px monospace`;
     ctx.textAlign = 'center';
-    ctx.fillText('NEW HIGH SCORE!', W / 2, cardY + cardH + 25);
+    ctx.fillText('⭐ NEW HIGH SCORE! ⭐', W / 2, bannerY);
     ctx.shadowBlur = 0;
   }
 
-  // Retry button
+  // Watermark
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('antara-paul04.github.io/stupid-game', W / 2, cardY + cardH - 8);
+
+  // === BUTTONS ===
   const alpha = (Math.sin(game.frame * 0.06) + 1) / 2;
-  const btnW = 200;
-  const btnH = 40;
-  const btnX = W / 2 - btnW / 2;
-  const btnY = cardY + cardH + (game.score >= game.highScore && game.score > 0 ? 40 : 20);
-  ctx.fillStyle = `rgba(255,100,100,${0.1 + alpha * 0.1})`;
+  const btnW2 = 150;
+  const btnH2 = 42;
+  const btnGap = 16;
+  const btnBaseY = cardY + cardH + 18;
+
+  // Share button
+  shareBtn.w = btnW2; shareBtn.h = btnH2;
+  shareBtn.x = W / 2 - btnW2 - btnGap / 2;
+  shareBtn.y = btnBaseY;
+  const shareGrad = ctx.createLinearGradient(shareBtn.x, btnBaseY, shareBtn.x, btnBaseY + btnH2);
+  shareGrad.addColorStop(0, `rgba(255,180,0,${0.15 + alpha * 0.1})`);
+  shareGrad.addColorStop(1, `rgba(200,140,0,${0.1 + alpha * 0.1})`);
+  ctx.fillStyle = shareGrad;
   ctx.beginPath();
-  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.roundRect(shareBtn.x, btnBaseY, btnW2, btnH2, 8);
+  ctx.fill();
+  ctx.strokeStyle = `rgba(255,200,50,${0.5 + alpha * 0.4})`;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(shareBtn.x, btnBaseY, btnW2, btnH2, 8);
+  ctx.stroke();
+  ctx.fillStyle = `rgba(255,220,100,${0.8 + alpha * 0.2})`;
+  ctx.font = `bold 15px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText('📤 SHARE', shareBtn.x + btnW2 / 2, btnBaseY + 27);
+
+  // Retry button
+  retryBtn.w = btnW2; retryBtn.h = btnH2;
+  retryBtn.x = W / 2 + btnGap / 2;
+  retryBtn.y = btnBaseY;
+  ctx.fillStyle = `rgba(255,80,80,${0.1 + alpha * 0.1})`;
+  ctx.beginPath();
+  ctx.roundRect(retryBtn.x, btnBaseY, btnW2, btnH2, 8);
   ctx.fill();
   ctx.strokeStyle = `rgba(255,100,100,${0.5 + alpha * 0.5})`;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.roundRect(btnX, btnY, btnW, btnH, 8);
+  ctx.roundRect(retryBtn.x, btnBaseY, btnW2, btnH2, 8);
   ctx.stroke();
   ctx.fillStyle = `rgba(255,255,255,${0.7 + alpha * 0.3})`;
-  ctx.font = `bold ${Math.min(W * 0.025, 20)}px monospace`;
+  ctx.font = `bold 15px monospace`;
   ctx.textAlign = 'center';
-  ctx.fillText('TAP TO RETRY', W / 2, btnY + 26);
+  ctx.fillText('🔄 RETRY', retryBtn.x + btnW2 / 2, btnBaseY + 27);
+
   ctx.textAlign = 'left';
+  shareCardReady = true;
+}
+
+// Generate share card as image
+function generateShareImage() {
+  const sc = document.createElement('canvas');
+  const sctx = sc.getContext('2d');
+  sc.width = 600;
+  sc.height = 400;
+
+  // Background
+  const bg = sctx.createLinearGradient(0, 0, 600, 400);
+  bg.addColorStop(0, '#1a0e05');
+  bg.addColorStop(0.5, '#2a1a0a');
+  bg.addColorStop(1, '#0f0a03');
+  sctx.fillStyle = bg;
+  sctx.fillRect(0, 0, 600, 400);
+
+  // Gold border
+  sctx.shadowColor = '#ffd700';
+  sctx.shadowBlur = 8;
+  const brd = sctx.createLinearGradient(0, 0, 600, 400);
+  brd.addColorStop(0, '#cc8800');
+  brd.addColorStop(0.5, '#ffd700');
+  brd.addColorStop(1, '#cc8800');
+  sctx.strokeStyle = brd;
+  sctx.lineWidth = 3;
+  sctx.beginPath();
+  sctx.roundRect(8, 8, 584, 384, 16);
+  sctx.stroke();
+  sctx.shadowBlur = 0;
+
+  // Inner border
+  sctx.strokeStyle = 'rgba(255,215,0,0.15)';
+  sctx.lineWidth = 1;
+  sctx.beginPath();
+  sctx.roundRect(14, 14, 572, 372, 12);
+  sctx.stroke();
+
+  // Title
+  sctx.textAlign = 'center';
+  sctx.shadowColor = '#ffd700';
+  sctx.shadowBlur = 12;
+  sctx.fillStyle = '#ffd700';
+  sctx.font = 'bold 32px monospace';
+  sctx.fillText('GOLD DIGGER', 300, 52);
+  sctx.shadowBlur = 0;
+
+  // Rank
+  sctx.fillStyle = xpLevel >= 5 ? '#ff66ff' : xpLevel >= 3 ? '#66ccff' : '#ffcc44';
+  sctx.font = 'bold 16px monospace';
+  sctx.fillText(getRankTitle(xpLevel), 300, 76);
+
+  // Divider
+  const dg = sctx.createLinearGradient(80, 0, 520, 0);
+  dg.addColorStop(0, 'rgba(255,215,0,0)');
+  dg.addColorStop(0.3, 'rgba(255,215,0,0.5)');
+  dg.addColorStop(0.5, 'rgba(255,230,100,0.8)');
+  dg.addColorStop(0.7, 'rgba(255,215,0,0.5)');
+  dg.addColorStop(1, 'rgba(255,215,0,0)');
+  sctx.fillStyle = dg;
+  sctx.fillRect(80, 88, 440, 2);
+
+  // Distance
+  sctx.fillStyle = 'rgba(255,255,255,0.4)';
+  sctx.font = 'bold 11px monospace';
+  sctx.fillText('DISTANCE MINED', 300, 112);
+  sctx.shadowColor = '#66aaff';
+  sctx.shadowBlur = 8;
+  sctx.fillStyle = '#88ccff';
+  sctx.font = 'bold 42px monospace';
+  sctx.fillText(`${Math.floor(game.score).toLocaleString()}m`, 300, 158);
+  sctx.shadowBlur = 0;
+
+  // Biome
+  sctx.fillStyle = 'rgba(255,255,255,0.3)';
+  sctx.font = '10px monospace';
+  sctx.fillText(`Reached: ${getBiomeName()}`, 300, 178);
+
+  // Stats (3x2 grid)
+  const gs = [
+    { l: '💎 CRYSTALS', v: game.crystalsCollected.toString(), c: '#ffd700' },
+    { l: '🔥 MAX COMBO', v: `${maxCombo}x`, c: '#ff66ff' },
+    { l: '⛽ FUEL LEFT', v: `${Math.floor(fuel)}%`, c: '#44ddff' },
+    { l: '💨 DODGES', v: nearMissCount.toString(), c: '#44ff44' },
+    { l: '⭐ RANK', v: `Lv.${xpLevel}`, c: xpLevel >= 5 ? '#ff44ff' : '#ffd700' },
+    { l: '📏 SCALE', v: `${player.scale.toFixed(2)}x`, c: '#ffaa44' },
+  ];
+  const gx = 80, gy = 205, cw = 180;
+  for (let i = 0; i < gs.length; i++) {
+    const col = i % 3;
+    const row = Math.floor(i / 3);
+    const x = gx + col * cw;
+    const y = gy + row * 55;
+    sctx.textAlign = 'left';
+    sctx.fillStyle = 'rgba(255,255,255,0.35)';
+    sctx.font = '10px monospace';
+    sctx.fillText(gs[i].l, x, y);
+    sctx.fillStyle = gs[i].c;
+    sctx.font = 'bold 18px monospace';
+    sctx.fillText(gs[i].v, x, y + 20);
+  }
+
+  // High score badge
+  if (game.score >= game.highScore && game.score > 0) {
+    sctx.shadowColor = '#ffd700';
+    sctx.shadowBlur = 10;
+    sctx.fillStyle = '#ffd700';
+    sctx.font = 'bold 14px monospace';
+    sctx.textAlign = 'center';
+    sctx.fillText('⭐ NEW HIGH SCORE! ⭐', 300, 340);
+    sctx.shadowBlur = 0;
+  }
+
+  // Watermark
+  sctx.fillStyle = 'rgba(255,255,255,0.2)';
+  sctx.font = '10px monospace';
+  sctx.textAlign = 'center';
+  sctx.fillText('antara-paul04.github.io/stupid-game', 300, 375);
+
+  return sc;
+}
+
+function shareCard() {
+  const shareCanvas = generateShareImage();
+  shareCanvas.toBlob(async (blob) => {
+    const file = new File([blob], 'gold-digger-score.png', { type: 'image/png' });
+    const shareData = {
+      title: 'Gold Digger',
+      text: `⛏ I mined ${Math.floor(game.score).toLocaleString()}m as a ${getRankTitle(xpLevel)}! 💎${game.crystalsCollected} crystals | 🔥${maxCombo}x combo\nCan you beat me?`,
+      url: 'https://antara-paul04.github.io/stupid-game/',
+    };
+
+    // Try native share with image first
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ ...shareData, files: [file] });
+        return;
+      } catch (e) { /* user cancelled or failed */ }
+    }
+
+    // Fallback: try share without image
+    if (navigator.share) {
+      try {
+        await navigator.share(shareData);
+        return;
+      } catch (e) { /* user cancelled */ }
+    }
+
+    // Final fallback: download the image
+    const link = document.createElement('a');
+    link.download = 'gold-digger-score.png';
+    link.href = shareCanvas.toDataURL('image/png');
+    link.click();
+  }, 'image/png');
 }
 
 // ===== GAME LOOP =====
