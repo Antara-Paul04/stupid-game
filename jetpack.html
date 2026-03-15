@@ -107,9 +107,10 @@ let game = {
   state: 'menu',
   score: 0,
   highScore: parseInt(localStorage.getItem('jetpackHigh') || '0'),
-  speed: 4,
+  speed: 3.6,
   frame: 0,
   crystalsCollected: 0,
+  level: 1,
 };
 
 // Player
@@ -216,9 +217,10 @@ function handleInput() {
 function startGame() {
   game.state = 'playing';
   game.score = 0;
-  game.speed = 4;
+  game.speed = 3.6;
   game.frame = 0;
   game.crystalsCollected = 0;
+  game.level = 1;
   player.y = canvas.height / 2;
   player.vy = 0;
   player.particles = [];
@@ -229,6 +231,44 @@ function startGame() {
   deathPieces = [];
   deathFlash = 0;
   screenShake = 0;
+}
+
+function getDifficultyState() {
+  const level = Math.min(4, Math.floor(game.score / 1000) + 1);
+  const obstacleInterval = [110, 95, 82, 70][level - 1];
+  const coinInterval = [78, 72, 68, 64][level - 1];
+  const speed = [3.6, 4.2, 4.9, 5.7][level - 1];
+  return { level, obstacleInterval, coinInterval, speed };
+}
+
+function createForkRock(side) {
+  const level = getDifficultyState().level;
+  const width = 70 + Math.random() * 35 + level * 6;
+  const height = 70 + Math.random() * 40 + level * 10;
+  const branchCount = 2 + Math.floor(Math.random() * 2);
+  const baseY = side === 'top' ? 14 : canvas.height - 50;
+  const direction = side === 'top' ? 1 : -1;
+  const prongs = [];
+
+  for (let i = 0; i < branchCount; i++) {
+    prongs.push({
+      offset: width * (0.2 + i * (0.6 / Math.max(1, branchCount - 1))),
+      width: 10 + Math.random() * 10,
+      length: height * (0.35 + Math.random() * 0.35),
+      lean: (Math.random() - 0.5) * 18,
+    });
+  }
+
+  return {
+    type: 'forkRock',
+    side,
+    x: canvas.width + 40,
+    y: side === 'top' ? baseY : baseY - height,
+    w: width,
+    h: height,
+    direction,
+    prongs,
+  };
 }
 
 // ===== DEATH EXPLOSION =====
@@ -294,9 +334,13 @@ function spawnDeathExplosion(px, py, scale) {
 
 // ===== SPAWN OBSTACLES =====
 function spawnObstacle() {
+  const difficulty = getDifficultyState();
+  const level = difficulty.level;
   const type = Math.random();
   const groundY = canvas.height - 50;
-  if (type < 0.4) {
+  if (level >= 2 && type < (level >= 4 ? 0.34 : level >= 3 ? 0.28 : 0.22)) {
+    obstacles.push(createForkRock(Math.random() > 0.5 ? 'top' : 'bottom'));
+  } else if (type < (level === 1 ? 0.62 : 0.42)) {
     const y = Math.random() * (groundY - 150) + 60;
     obstacles.push({
       type: 'boulder',
@@ -311,7 +355,7 @@ function spawnObstacle() {
         l: Math.random() * 0.6 + 0.3,
       })),
     });
-  } else if (type < 0.7) {
+  } else if (level >= 2 && type < (level >= 4 ? 0.72 : 0.64)) {
     const y = Math.random() * (groundY - 100) + 60;
     obstacles.push({
       type: 'rollingStone',
@@ -319,13 +363,13 @@ function spawnObstacle() {
       y: y,
       w: 48, h: 48,
       radius: 24,
-      speed: game.speed + 3,
+      speed: game.speed + 2.5 + level * 0.35,
       warning: 60,
       warningY: y,
       angle: 0,
       bumps: Array.from({length: 10}, () => Math.random() * 8 + 20),
     });
-  } else {
+  } else if (level >= 3) {
     const y = Math.random() * (groundY - 120) + 60;
     obstacles.push({
       type: 'dustCloud',
@@ -339,6 +383,21 @@ function spawnObstacle() {
         oy: (Math.random() - 0.5) * 50,
         size: Math.random() * 10 + 3,
         drift: (Math.random() - 0.5) * 0.5,
+      })),
+    });
+  } else {
+    const y = Math.random() * (groundY - 150) + 60;
+    obstacles.push({
+      type: 'boulder',
+      x: canvas.width + 20,
+      y: y,
+      w: 26, h: 26,
+      radius: 13 + Math.random() * 10,
+      angle: Math.random() * Math.PI * 2,
+      rotSpeed: (Math.random() - 0.5) * 0.05,
+      cracks: Array.from({length: 2}, () => ({
+        a: Math.random() * Math.PI * 2,
+        l: Math.random() * 0.5 + 0.25,
       })),
     });
   }
@@ -446,10 +505,12 @@ function update() {
   }
 
   game.score += 1;
-  game.speed = 4 + Math.floor(game.score / 500) * 0.5;
+  const difficulty = getDifficultyState();
+  game.level = difficulty.level;
+  game.speed = difficulty.speed;
 
-  if (game.frame % 85 === 0) spawnObstacle();
-  if (game.frame % 65 === 0) spawnCoins();
+  if (game.frame % difficulty.obstacleInterval === 0) spawnObstacle();
+  if (game.frame % difficulty.coinInterval === 0) spawnCoins();
 
   // Update obstacles
   for (let i = obstacles.length - 1; i >= 0; i--) {
@@ -461,6 +522,8 @@ function update() {
       o.x -= game.speed;
       if (o.timer > 0) o.timer--;
       else o.active = true;
+    } else if (o.type === 'forkRock') {
+      o.x -= game.speed;
     } else {
       o.x -= game.speed;
       o.angle += o.rotSpeed;
@@ -475,6 +538,20 @@ function update() {
       hit = circleRectOverlap(o.x + o.w / 2, o.y, o.radius, player.x, player.y, sw, sh);
     } else if (o.type === 'dustCloud' && o.active) {
       hit = rectsOverlap(player.x, player.y, sw, sh, o.x, o.y - o.h / 2, o.w, o.h);
+    } else if (o.type === 'forkRock') {
+      const trunkH = o.h * 0.55;
+      const trunkY = o.side === 'top' ? o.y : o.y + o.h - trunkH;
+      hit = rectsOverlap(player.x, player.y, sw, sh, o.x + o.w * 0.32, trunkY, o.w * 0.36, trunkH);
+      if (!hit) {
+        for (const prong of o.prongs) {
+          const prongX = o.x + prong.offset - prong.width / 2;
+          const prongY = o.side === 'top' ? o.y + trunkH - 6 : o.y + o.h - trunkH - prong.length + 6;
+          if (rectsOverlap(player.x, player.y, sw, sh, prongX, prongY, prong.width, prong.length)) {
+            hit = true;
+            break;
+          }
+        }
+      }
     }
 
     if (hit) {
@@ -561,7 +638,7 @@ function draw() {
   ctx.save();
 
   // Screen shake
-  if (screenShake > 0.5) {
+  if (game.state === 'playing' && screenShake > 0.5) {
     const intensity = screenShake;
     ctx.translate(
       (Math.random() - 0.5) * intensity * 3,
@@ -752,6 +829,7 @@ function draw() {
     if (o.type === 'boulder') drawBoulder(o);
     else if (o.type === 'rollingStone') drawRollingStone(o);
     else if (o.type === 'dustCloud') drawDustCloud(o);
+    else if (o.type === 'forkRock') drawForkRock(o);
   }
 
   // === CRYSTALS ===
@@ -1050,6 +1128,67 @@ function drawDustCloud(o) {
   }
 }
 
+function drawForkRock(o) {
+  const trunkH = o.h * 0.55;
+  const trunkX = o.x + o.w * 0.32;
+  const trunkW = o.w * 0.36;
+  const trunkY = o.side === 'top' ? o.y : o.y + o.h - trunkH;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(trunkX + 4, trunkY + 4, trunkW, trunkH);
+
+  const rockGrad = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y + o.h);
+  rockGrad.addColorStop(0, '#8a745c');
+  rockGrad.addColorStop(0.55, '#5e4935');
+  rockGrad.addColorStop(1, '#3d2d1d');
+
+  ctx.fillStyle = rockGrad;
+  ctx.beginPath();
+  if (o.side === 'top') {
+    ctx.moveTo(trunkX, o.y);
+    ctx.lineTo(trunkX + trunkW, o.y);
+    ctx.lineTo(trunkX + trunkW, trunkY + trunkH);
+    ctx.lineTo(trunkX, trunkY + trunkH);
+  } else {
+    ctx.moveTo(trunkX, trunkY);
+    ctx.lineTo(trunkX + trunkW, trunkY);
+    ctx.lineTo(trunkX + trunkW, o.y + o.h);
+    ctx.lineTo(trunkX, o.y + o.h);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  for (const prong of o.prongs) {
+    const prongX = o.x + prong.offset;
+    const tipY = o.side === 'top' ? o.y + o.h : o.y;
+    const rootY = o.side === 'top' ? trunkY + trunkH * 0.82 : trunkY + trunkH * 0.18;
+
+    ctx.beginPath();
+    ctx.moveTo(prongX - prong.width * 0.5, rootY);
+    ctx.lineTo(prongX + prong.lean, tipY);
+    ctx.lineTo(prongX + prong.width * 0.5, rootY);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.beginPath();
+    ctx.moveTo(prongX - prong.width * 0.18, rootY + o.direction * 4);
+    ctx.lineTo(prongX + prong.lean * 0.55, tipY - o.direction * 12);
+    ctx.lineTo(prongX + prong.width * 0.1, rootY + o.direction * 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = rockGrad;
+  }
+
+  ctx.strokeStyle = 'rgba(40,25,12,0.55)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(trunkX + trunkW * 0.45, trunkY + 8);
+  ctx.lineTo(trunkX + trunkW * 0.3, trunkY + trunkH * 0.45);
+  ctx.lineTo(trunkX + trunkW * 0.6, trunkY + trunkH * 0.88);
+  ctx.stroke();
+}
+
 // ===== DRAW CRYSTAL =====
 function drawCrystal(cx, cy, size, rotation) {
   ctx.save();
@@ -1149,6 +1288,10 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '9px monospace';
   ctx.fillText(`${Math.floor(game.score / milestone + 1)}km`, pbX + pbW + 5, pbY + 8);
+
+  ctx.fillStyle = '#ffcc66';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText(`LEVEL ${game.level}`, pbX, pbY - 4);
 
   // === CENTER: Day/Night toggle ===
   const toggleW = 90;
@@ -1259,18 +1402,19 @@ function drawMenu() {
   ctx.fillStyle = '#999';
   ctx.font = `${Math.min(W * 0.02, 15)}px monospace`;
   ctx.fillText('Hold SPACE / CLICK / TAP to fly', W / 2, cy + 10);
-  ctx.fillText('Collect crystals  |  Avoid stones & cave-ins', W / 2, cy + 32);
-  ctx.fillText('Press N or click toggle for Day/Night', W / 2, cy + 54);
+  ctx.fillText('Start easy, then every 1km the cave gets meaner', W / 2, cy + 32);
+  ctx.fillText('Collect crystals  |  Avoid stones, cave-ins and fork rocks', W / 2, cy + 54);
+  ctx.fillText('Press N or click toggle for Day/Night', W / 2, cy + 76);
 
   const alpha = (Math.sin(game.frame * 0.05) + 1) / 2;
   ctx.fillStyle = `rgba(255,255,255,${0.5 + alpha * 0.5})`;
   ctx.font = `bold ${Math.min(W * 0.03, 24)}px monospace`;
-  ctx.fillText('TAP TO START', W / 2, cy + 100);
+  ctx.fillText('TAP TO START', W / 2, cy + 116);
 
   if (game.highScore > 0) {
     ctx.fillStyle = '#ffd700';
     ctx.font = '14px monospace';
-    ctx.fillText(`High Score: ${game.highScore}m`, W / 2, cy + 140);
+    ctx.fillText(`High Score: ${game.highScore}m`, W / 2, cy + 156);
   }
   ctx.textAlign = 'left';
 }
